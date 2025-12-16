@@ -3,7 +3,7 @@ import './globals.css';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { ClerkProvider, SignInButton, SignedIn, SignedOut, UserButton } from '@clerk/nextjs';
-import { Home, BarChart3 } from 'lucide-react';
+import { Home, BarChart3, TrendingUp } from 'lucide-react';
 
 export default function RootLayout({
   children,
@@ -15,6 +15,7 @@ export default function RootLayout({
   const navItems = [
     { href: '/', label: 'Home', icon: Home },
     { href: '/dashboard', label: 'Dashboard', icon: BarChart3 },
+    { href: '/analytics', label: 'Analytics', icon: TrendingUp },
   ];
 
   return (
