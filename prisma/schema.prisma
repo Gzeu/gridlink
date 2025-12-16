@@ -1,0 +1,93 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 Int       @id @default(autoincrement())
+  email              String    @unique
+  walletAddress      String?   @map("wallet_address")
+  stripeCustomerId   String?   @map("stripe_customer_id")
+  subscriptionTier   String    @default("free") @map("subscription_tier")
+  subscriptionStatus String    @default("active") @map("subscription_status")
+  egldCredits        Decimal   @default(0) @map("egld_credits") @db.Decimal(10, 4)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  
+  apis               Api[]
+  egldTransactions   EgldTransaction[]
+  monthlyUsage       MonthlyUsage[]
+
+  @@map("users")
+}
+
+model Api {
+  id               Int       @id @default(autoincrement())
+  apiKey           String    @unique @map("api_key")
+  userId           Int       @map("user_id")
+  sheetId          String    @map("sheet_id")
+  sheetUrl         String    @map("sheet_url")
+  sheetName        String    @default("Sheet1") @map("sheet_name")
+  apiName          String?   @map("api_name")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  lastAccessed     DateTime? @map("last_accessed")
+  callCountTotal   BigInt    @default(0) @map("call_count_total")
+  callCountMonth   Int       @default(0) @map("call_count_month")
+  isActive         Boolean   @default(true) @map("is_active")
+  webhookUrl       String?   @map("webhook_url")
+  
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiCalls         ApiCall[]
+
+  @@index([userId])
+  @@map("apis")
+}
+
+model ApiCall {
+  id              Int      @id @default(autoincrement())
+  apiKey          String   @map("api_key")
+  endpoint        String
+  timestamp       DateTime @default(now())
+  responseTimeMs  Int      @map("response_time_ms")
+  statusCode      Int      @map("status_code")
+  ipAddress       String?  @map("ip_address")
+  userAgent       String?  @map("user_agent")
+  
+  api             Api      @relation(fields: [apiKey], references: [apiKey])
+
+  @@index([apiKey])
+  @@index([timestamp])
+  @@map("api_calls")
+}
+
+model EgldTransaction {
+  id            Int       @id @default(autoincrement())
+  userId        Int       @map("user_id")
+  txHash        String    @unique @map("tx_hash")
+  amountEgld    Decimal   @map("amount_egld") @db.Decimal(18, 4)
+  creditsAdded  Decimal   @map("credits_added") @db.Decimal(10, 4)
+  status        String    @default("pending")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  confirmedAt   DateTime? @map("confirmed_at")
+  
+  user          User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("egld_transactions")
+}
+
+model MonthlyUsage {
+  id          Int      @id @default(autoincrement())
+  userId      Int      @map("user_id")
+  month       DateTime
+  callsUsed   Int      @default(0) @map("calls_used")
+  callsLimit  Int      @map("calls_limit")
+  
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, month])
+  @@map("monthly_usage")
+}
