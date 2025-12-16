@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Toaster, toast } from 'react-hot-toast';
+import { useAuth, useUser } from '@clerk/nextjs';
 import {
   Activity,
   Database,
@@ -19,7 +20,26 @@ import {
   Calendar,
   BarChart3,
   Wallet,
+  PieChart,
+  TrendingDown,
 } from 'lucide-react';
+import {
+  LineChart,
+  Line,
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  PieChart as RechartsPieChart,
+  Pie,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts';
 
 interface ApiCall {
   id: string;
@@ -52,6 +72,8 @@ interface SheetMapping {
 }
 
 export default function Dashboard() {
+  const { isLoaded, userId } = useAuth();
+  const { user } = useUser();
   const [apiCalls, setApiCalls] = useState<ApiCall[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [sheets, setSheets] = useState<SheetMapping[]>([]);
@@ -65,17 +87,43 @@ export default function Dashboard() {
     remainingCalls: 753,
   });
 
+  // Chart data
+  const [usageData, setUsageData] = useState([
+    { date: 'Mon', calls: 45, cached: 32 },
+    { date: 'Tue', calls: 52, cached: 38 },
+    { date: 'Wed', calls: 61, cached: 44 },
+    { date: 'Thu', calls: 48, cached: 35 },
+    { date: 'Fri', calls: 71, cached: 52 },
+    { date: 'Sat', calls: 38, cached: 28 },
+    { date: 'Sun', calls: 42, cached: 31 },
+  ]);
+
+  const [methodData, setMethodData] = useState([
+    { name: 'GET', value: 156, color: '#10b981' },
+    { name: 'POST', value: 72, color: '#3b82f6' },
+    { name: 'PUT', value: 14, color: '#8b5cf6' },
+    { name: 'DELETE', value: 5, color: '#ef4444' },
+  ]);
+
+  const [statusData, setStatusData] = useState([
+    { status: '200', count: 189 },
+    { status: '201', count: 45 },
+    { status: '400', count: 8 },
+    { status: '500', count: 2 },
+  ]);
+
   useEffect(() => {
-    loadDashboardData();
-  }, []);
+    if (isLoaded && userId) {
+      loadDashboardData();
+    }
+  }, [isLoaded, userId]);
 
   const loadDashboardData = async () => {
     setLoading(true);
     try {
-      // Simulate API calls - Replace with real endpoints
       await new Promise(resolve => setTimeout(resolve, 1000));
       
-      // Mock data for demonstration
+      // Mock data - Replace with real API calls
       setApiCalls([
         {
           id: '1',
@@ -177,7 +225,7 @@ export default function Dashboard() {
     return `${address.slice(0, 10)}...${address.slice(-8)}`;
   };
 
-  if (loading) {
+  if (!isLoaded || loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <motion.div
@@ -204,14 +252,16 @@ export default function Dashboard() {
       />
 
       <div className="space-y-8">
-        {/* Header */}
+        {/* Header with User Greeting */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className="flex items-center justify-between"
         >
           <div>
-            <h1 className="text-4xl font-bold text-slate-100">Dashboard</h1>
+            <h1 className="text-4xl font-bold text-slate-100">
+              Welcome back{user?.firstName ? `, ${user.firstName}` : ''}!
+            </h1>
             <p className="text-slate-400 mt-2">Monitor your API usage and payments</p>
           </div>
           <motion.button
@@ -287,13 +337,110 @@ export default function Dashboard() {
           </div>
         </motion.div>
 
-        {/* Sheet Mappings */}
+        {/* Charts Section */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
-          className="rounded-xl border border-slate-700 bg-slate-800/50 p-6"
+          className="grid lg:grid-cols-2 gap-6"
         >
+          {/* Weekly Usage Trend */}
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+            <div className="flex items-center gap-3 mb-6">
+              <TrendingUp className="h-6 w-6 text-blue-400" />
+              <h2 className="text-2xl font-bold text-slate-100">Weekly Usage</h2>
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <AreaChart data={usageData}>
+                <defs>
+                  <linearGradient id="colorCalls" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.8}/>
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                  <linearGradient id="colorCached" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.8}/>
+                    <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="date" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: '#1e293b', 
+                    border: '1px solid #334155',
+                    borderRadius: '8px'
+                  }} 
+                />
+                <Area type="monotone" dataKey="calls" stroke="#3b82f6" fillOpacity={1} fill="url(#colorCalls)" />
+                <Area type="monotone" dataKey="cached" stroke="#06b6d4" fillOpacity={1} fill="url(#colorCached)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Method Distribution */}
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+            <div className="flex items-center gap-3 mb-6">
+              <PieChart className="h-6 w-6 text-green-400" />
+              <h2 className="text-2xl font-bold text-slate-100">Method Distribution</h2>
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <RechartsPieChart>
+                <Pie
+                  data={methodData}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={(entry) => `${entry.name}: ${entry.value}`}
+                  outerRadius={80}
+                  fill="#8884d8"
+                  dataKey="value"
+                >
+                  {methodData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: '#1e293b', 
+                    border: '1px solid #334155',
+                    borderRadius: '8px'
+                  }} 
+                />
+              </RechartsPieChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Status Code Distribution */}
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6 lg:col-span-2">
+            <div className="flex items-center gap-3 mb-6">
+              <Activity className="h-6 w-6 text-purple-400" />
+              <h2 className="text-2xl font-bold text-slate-100">Response Status Codes</h2>
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={statusData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="status" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: '#1e293b', 
+                    border: '1px solid #334155',
+                    borderRadius: '8px'
+                  }} 
+                />
+                <Bar dataKey="count" fill="#8b5cf6" radius={[8, 8, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </motion.div>
+
+        {/* Sheet Mappings */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-3">
               <Link2 className="h-6 w-6 text-blue-400" />
@@ -308,7 +455,7 @@ export default function Dashboard() {
                 key={sheet.id}
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.3 + index * 0.1 }}
+                transition={{ delay: 0.4 + index * 0.1 }}
                 className="rounded-lg border border-slate-700 bg-slate-900/50 p-4 hover:border-slate-600 transition-colors"
               >
                 <div className="flex items-start justify-between">
@@ -351,15 +498,14 @@ export default function Dashboard() {
           </div>
         </motion.div>
 
-        {/* Two Column Layout */}
+        {/* Two Column Layout: Recent Activity */}
         <div className="grid lg:grid-cols-2 gap-8">
           {/* Recent API Calls */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
-            className="rounded-xl border border-slate-700 bg-slate-800/50 p-6"
-          >
+            transition={{ delay: 0.4 }}
+            className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center gap-3 mb-6">
               <Activity className="h-6 w-6 text-cyan-400" />
               <h2 className="text-2xl font-bold text-slate-100">Recent API Calls</h2>
@@ -371,7 +517,7 @@ export default function Dashboard() {
                   key={call.id}
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.4 + index * 0.1 }}
+                  transition={{ delay: 0.5 + index * 0.1 }}
                   className="rounded-lg border border-slate-700 bg-slate-900/50 p-4"
                 >
                   <div className="flex items-center justify-between mb-2">
@@ -409,9 +555,8 @@ export default function Dashboard() {
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 }}
-            className="rounded-xl border border-slate-700 bg-slate-800/50 p-6"
-          >
+            transition={{ delay: 0.5 }}
+            className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center gap-3 mb-6">
               <Wallet className="h-6 w-6 text-green-400" />
               <h2 className="text-2xl font-bold text-slate-100">Payment History</h2>
@@ -423,7 +568,7 @@ export default function Dashboard() {
                   key={payment.id}
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.5 + index * 0.1 }}
+                  transition={{ delay: 0.6 + index * 0.1 }}
                   className="rounded-lg border border-slate-700 bg-slate-900/50 p-4"
                 >
                   <div className="flex items-center justify-between mb-3">
