@@ -21,6 +21,7 @@ model User {
   egldTransactions   EgldTransaction[]
   monthlyUsage       MonthlyUsage[]
   payments           Payment[]
+  apiRequests        ApiRequest[]
 
   @@map("users")
 }
@@ -48,20 +49,36 @@ model Api {
 }
 
 model ApiCall {
-  id              Int      @id @default(autoincrement())
-  apiKey          String   @map("api_key")
-  endpoint        String
-  timestamp       DateTime @default(now())
-  responseTimeMs  Int      @map("response_time_ms")
-  statusCode      Int      @map("status_code")
-  ipAddress       String?  @map("ip_address")
-  userAgent       String?  @map("user_agent")
+  id             Int      @id @default(autoincrement())
+  apiKey         String   @map("api_key")
+  endpoint       String
+  timestamp      DateTime @default(now())
+  responseTimeMs Int      @map("response_time_ms")
+  statusCode     Int      @map("status_code")
+  ipAddress      String?  @map("ip_address")
+  userAgent      String?  @map("user_agent")
 
-  api             Api      @relation(fields: [apiKey], references: [apiKey])
+  api            Api      @relation(fields: [apiKey], references: [apiKey])
 
   @@index([apiKey])
   @@index([timestamp])
   @@map("api_calls")
+}
+
+// Tracks raw write requests (POST /api/sheets) for audit trail
+model ApiRequest {
+  id          Int      @id @default(autoincrement())
+  sheetId     String   @map("sheet_id")
+  method      String   @default("POST")
+  userId      Int?     @map("user_id")
+  egldAddress String?  @map("egld_address")
+  status      String   @default("pending") // pending | success | failed
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("api_requests")
 }
 
 model EgldTransaction {
@@ -70,7 +87,7 @@ model EgldTransaction {
   txHash        String    @unique @map("tx_hash")
   amountEgld    Decimal   @map("amount_egld") @db.Decimal(18, 4)
   creditsAdded  Decimal   @map("credits_added") @db.Decimal(10, 4)
-  status        String    @default("pending")
+  status        String    @default("pending") // pending | confirmed | failed
   createdAt     DateTime  @default(now()) @map("created_at")
   confirmedAt   DateTime? @map("confirmed_at")
 
@@ -93,7 +110,7 @@ model MonthlyUsage {
   @@map("monthly_usage")
 }
 
-// Payment model — tracks EGLD payments for tier upgrades
+// Tracks EGLD payment initiations and verifications
 model Payment {
   id               String    @id @default(cuid())
   userId           Int?      @map("user_id")
@@ -102,7 +119,7 @@ model Payment {
   userAddress      String    @map("user_address")
   txHash           String?   @unique @map("tx_hash")
   status           String    @default("pending") // pending | completed | failed
-  tier             String?   // free | pro | enterprise
+  tier             String?   // pro | enterprise
   createdAt        DateTime  @default(now()) @map("created_at")
   confirmedAt      DateTime? @map("confirmed_at")
 
