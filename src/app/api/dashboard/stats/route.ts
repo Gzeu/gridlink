@@ -1,64 +1,68 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/db';
+import { NextRequest } from 'next/server';
+import { ok, err } from '@/lib/response';
+import prisma from '@/lib/db';
+
+export const runtime = 'nodejs';
+
+const TIER_LIMITS: Record<string, number> = {
+  free:       1_000,
+  pro:        10_000,
+  enterprise: Infinity,
+};
+
+function monthStart(): Date {
+  const d = new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
 
 export async function GET(request: NextRequest) {
-  try {
-    // Get date range for current month
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    
-    // Get total API calls
-    const totalCalls = await prisma.apiCall.count();
-    
-    // Get cached calls count
-    const cachedCalls = await prisma.apiCall.count({
-      where: { cachedFromRedis: true },
-    });
-    
-    // Get calls this month
-    const callsThisMonth = await prisma.apiCall.count({
-      where: {
-        createdAt: {
-          gte: startOfMonth,
-        },
-      },
-    });
-    
-    // Get successful calls (status 200-299)
-    const successfulCalls = await prisma.apiCall.count({
-      where: {
-        status: {
-          gte: 200,
-          lt: 300,
-        },
-      },
-    });
-    
-    // Calculate success rate
-    const successRate = totalCalls > 0 
-      ? Math.round((successfulCalls / totalCalls) * 100) 
-      : 100;
-    
-    // Get recent calls for average response time calculation
-    // Note: You'll need to add a responseTime field to your schema
-    const avgResponseTime = 89; // Placeholder - implement actual calculation
-    
-    const remainingCalls = Math.max(0, 1000 - callsThisMonth);
-    
-    return NextResponse.json({
-      totalCalls,
-      cachedCalls,
-      callsThisMonth,
-      remainingCalls,
-      successRate,
-      avgResponseTime,
-      cacheHitRate: totalCalls > 0 ? Math.round((cachedCalls / totalCalls) * 100) : 0,
-    });
-  } catch (error) {
-    console.error('Dashboard stats error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch dashboard stats' },
-      { status: 500 }
-    );
-  }
+  const clerkId = request.nextUrl.searchParams.get('clerkId');
+  if (!clerkId) return err('Missing clerkId parameter', 400);
+
+  const user = await prisma.user.findUnique({ where: { clerkId } });
+  if (!user) return err('User not found', 404);
+
+  const month = monthStart();
+
+  const [totalCalls, callsThisMonth, cacheHits, avgResp, usage, activeApis] =
+    await prisma.$transaction([
+      prisma.apiCall.count({ where: { api: { userId: user.id } } }),
+      prisma.apiCall.count({
+        where: { api: { userId: user.id }, timestamp: { gte: month } },
+      }),
+      prisma.apiCall.count({
+        where: { api: { userId: user.id }, cacheHit: true },
+      }),
+      prisma.apiCall.aggregate({
+        where: { api: { userId: user.id } },
+        _avg:  { responseTimeMs: true },
+      }),
+      prisma.monthlyUsage.findUnique({
+        where: { userId_month: { userId: user.id, month } },
+      }),
+      prisma.api.count({ where: { userId: user.id, isActive: true } }),
+    ]);
+
+  const tier       = user.subscriptionTier ?? 'free';
+  const limit      = TIER_LIMITS[tier] ?? TIER_LIMITS.free;
+  const callsUsed  = usage?.callsUsed ?? 0;
+  const remaining  = limit === Infinity ? Infinity : Math.max(0, limit - callsUsed);
+  const successCalls = await prisma.apiCall.count({
+    where: { api: { userId: user.id }, statusCode: { gte: 200, lt: 400 } },
+  });
+
+  return ok({
+    totalCalls,
+    callsThisMonth,
+    cacheHits,
+    cacheHitRate:    totalCalls > 0 ? Math.round((cacheHits / totalCalls) * 100) : 0,
+    avgResponseTime: Math.round(avgResp._avg.responseTimeMs ?? 0),
+    successRate:     totalCalls > 0 ? Math.round((successCalls / totalCalls) * 100) : 100,
+    remainingCalls:  remaining,
+    callsLimit:      limit,
+    tier,
+    activeApis,
+  });
 }

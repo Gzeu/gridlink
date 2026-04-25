@@ -1,628 +1,429 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Toaster, toast } from 'react-hot-toast';
 import { useAuth, useUser } from '@clerk/nextjs';
 import {
-  Activity,
-  Database,
-  Zap,
-  TrendingUp,
-  Clock,
-  DollarSign,
-  Link2,
-  Trash2,
-  ExternalLink,
-  RefreshCw,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  Calendar,
-  BarChart3,
-  Wallet,
-  PieChart,
-  TrendingDown,
+  Activity, Database, Zap, TrendingUp, Clock,
+  DollarSign, Link2, Trash2, ExternalLink, RefreshCw,
+  CheckCircle2, XCircle, AlertCircle, Calendar,
+  BarChart3, Wallet, PieChart,
 } from 'lucide-react';
 import {
-  LineChart,
-  Line,
-  AreaChart,
-  Area,
-  BarChart,
-  Bar,
-  PieChart as RechartsPieChart,
-  Pie,
-  Cell,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
+  AreaChart, Area, BarChart, Bar,
+  PieChart as RechartsPieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 
-interface ApiCall {
-  id: string;
-  sheetId: string;
-  method: string;
-  endpoint: string;
-  status: number;
-  cachedFromRedis: boolean;
-  egldAddress?: string;
-  createdAt: string;
+/* ─── Types ────────────────────────────────────────────────── */
+interface Stats {
+  totalCalls:      number;
+  callsThisMonth:  number;
+  cacheHits:       number;
+  cacheHitRate:    number;
+  avgResponseTime: number;
+  successRate:     number;
+  remainingCalls:  number;
+  callsLimit:      number;
+  tier:            string;
+  activeApis:      number;
+}
+
+interface ApiCallRow {
+  id:             number;
+  apiKey:         string;
+  endpoint:       string;
+  statusCode:     number;
+  responseTimeMs: number | null;
+  cacheHit:       boolean;
+  ipAddress:      string | null;
+  timestamp:      string;
+  api: { apiName: string; sheetId: string };
+}
+
+interface ApiKey {
+  id:            number;
+  apiKey:        string;
+  apiName:       string;
+  sheetId:       string;
+  sheetUrl:      string;
+  callCountTotal: number;
+  lastAccessed:  string | null;
+  isActive:      boolean;
 }
 
 interface Payment {
-  id: string;
-  senderAddress: string;
-  receiverAddress: string;
-  amount: string;
-  transactionHash: string;
-  status: 'pending' | 'confirmed' | 'failed';
-  description?: string;
-  createdAt: string;
+  id:          number;
+  txHash:      string;
+  amountEgld:  number;
+  status:      string;
+  confirmedAt: string | null;
+  createdAt:   string;
 }
 
-interface SheetMapping {
-  id: string;
-  sheetUrl: string;
-  apiEndpoint: string;
-  totalCalls: number;
-  lastAccessed: string;
+/* ─── Helpers ──────────────────────────────────────────────── */
+function timeAgo(iso: string): string {
+  const diff    = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(diff / 60_000);
+  const hours   = Math.floor(diff / 3_600_000);
+  if (minutes < 1)  return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  if (hours   < 24) return `${hours}h ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
+function truncAddr(addr: string): string {
+  return addr.length > 18 ? `${addr.slice(0, 10)}...${addr.slice(-8)}` : addr;
+}
+
+/* ─── Component ────────────────────────────────────────────── */
 export default function Dashboard() {
   const { isLoaded, userId } = useAuth();
-  const { user } = useUser();
-  const [apiCalls, setApiCalls] = useState<ApiCall[]>([]);
+  const { user }             = useUser();
+
+  const [stats,    setStats]    = useState<Stats | null>(null);
+  const [calls,    setCalls]    = useState<ApiCallRow[]>([]);
+  const [apiKeys,  setApiKeys]  = useState<ApiKey[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
-  const [sheets, setSheets] = useState<SheetMapping[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({
-    totalCalls: 0,
-    cachedCalls: 0,
-    successRate: 100,
-    avgResponseTime: 89,
-    callsThisMonth: 247,
-    remainingCalls: 753,
-  });
+  const [loading,  setLoading]  = useState(true);
 
-  // Chart data
-  const [usageData, setUsageData] = useState([
-    { date: 'Mon', calls: 45, cached: 32 },
-    { date: 'Tue', calls: 52, cached: 38 },
-    { date: 'Wed', calls: 61, cached: 44 },
-    { date: 'Thu', calls: 48, cached: 35 },
-    { date: 'Fri', calls: 71, cached: 52 },
-    { date: 'Sat', calls: 38, cached: 28 },
-    { date: 'Sun', calls: 42, cached: 31 },
-  ]);
+  // Derived chart data from real calls
+  const methodData = [
+    { name: 'GET',    value: calls.filter(c => c.endpoint.includes('GET')   || c.statusCode < 400).length, color: '#10b981' },
+    { name: '2xx',   value: calls.filter(c => c.statusCode >= 200 && c.statusCode < 300).length, color: '#3b82f6' },
+    { name: '4xx',   value: calls.filter(c => c.statusCode >= 400 && c.statusCode < 500).length, color: '#f59e0b' },
+    { name: '5xx',   value: calls.filter(c => c.statusCode >= 500).length, color: '#ef4444' },
+  ].filter(d => d.value > 0);
 
-  const [methodData, setMethodData] = useState([
-    { name: 'GET', value: 156, color: '#10b981' },
-    { name: 'POST', value: 72, color: '#3b82f6' },
-    { name: 'PUT', value: 14, color: '#8b5cf6' },
-    { name: 'DELETE', value: 5, color: '#ef4444' },
-  ]);
+  const statusData = ['200','201','400','401','403','429','500','502'].map(s => ({
+    status: s,
+    count:  calls.filter(c => String(c.statusCode) === s).length,
+  })).filter(d => d.count > 0);
 
-  const [statusData, setStatusData] = useState([
-    { status: '200', count: 189 },
-    { status: '201', count: 45 },
-    { status: '400', count: 8 },
-    { status: '500', count: 2 },
-  ]);
-
-  useEffect(() => {
-    if (isLoaded && userId) {
-      loadDashboardData();
-    }
-  }, [isLoaded, userId]);
-
-  const loadDashboardData = async () => {
+  const fetchAll = useCallback(async () => {
+    if (!userId) return;
     setLoading(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Mock data - Replace with real API calls
-      setApiCalls([
-        {
-          id: '1',
-          sheetId: 'abc123',
-          method: 'GET',
-          endpoint: '/api/sheets',
-          status: 200,
-          cachedFromRedis: true,
-          egldAddress: 'erd1...',
-          createdAt: new Date(Date.now() - 2 * 60000).toISOString(),
-        },
-        {
-          id: '2',
-          sheetId: 'def456',
-          method: 'POST',
-          endpoint: '/api/sheets',
-          status: 201,
-          cachedFromRedis: false,
-          createdAt: new Date(Date.now() - 15 * 60000).toISOString(),
-        },
-        {
-          id: '3',
-          sheetId: 'ghi789',
-          method: 'GET',
-          endpoint: '/api/sheets',
-          status: 200,
-          cachedFromRedis: true,
-          createdAt: new Date(Date.now() - 45 * 60000).toISOString(),
-        },
+      const [statsRes, callsRes, keysRes, paymentsRes] = await Promise.all([
+        fetch(`/api/dashboard/stats?clerkId=${userId}`),
+        fetch(`/api/dashboard/calls?clerkId=${userId}&limit=20`),
+        fetch(`/api/keys?clerkId=${userId}`),
+        fetch(`/api/payments?clerkId=${userId}`),
       ]);
 
-      setPayments([
-        {
-          id: '1',
-          senderAddress: 'erd1qyu5wthldzr8wx5c9ucg8kjagg0jfs53s8nr3zpz3hypefsdd8ssycr6th',
-          receiverAddress: 'erd1spyavw0956vq68xj8y4tenjpq2wd5a9p2c6j8gsz7ztyrnpxrruqzu66jx',
-          amount: '0.5',
-          transactionHash: '0xa1b2c3d4e5f6...',
-          status: 'confirmed',
-          description: 'API usage payment',
-          createdAt: new Date(Date.now() - 3600000).toISOString(),
-        },
-        {
-          id: '2',
-          senderAddress: 'erd1qyu5wthldzr8wx5c9ucg8kjagg0jfs53s8nr3zpz3hypefsdd8ssycr6th',
-          receiverAddress: 'erd1spyavw0956vq68xj8y4tenjpq2wd5a9p2c6j8gsz7ztyrnpxrruqzu66jx',
-          amount: '1.0',
-          transactionHash: '0xf6e5d4c3b2a1...',
-          status: 'pending',
-          description: 'Premium tier upgrade',
-          createdAt: new Date(Date.now() - 300000).toISOString(),
-        },
-      ]);
-
-      setSheets([
-        {
-          id: '1',
-          sheetUrl: 'https://docs.google.com/spreadsheets/d/abc123/edit',
-          apiEndpoint: `${window.location.origin}/api/sheets?sheetUrl=...`,
-          totalCalls: 156,
-          lastAccessed: new Date(Date.now() - 120000).toISOString(),
-        },
-        {
-          id: '2',
-          sheetUrl: 'https://docs.google.com/spreadsheets/d/def456/edit',
-          apiEndpoint: `${window.location.origin}/api/sheets?sheetUrl=...`,
-          totalCalls: 91,
-          lastAccessed: new Date(Date.now() - 900000).toISOString(),
-        },
-      ]);
-
-      toast.success('Dashboard data loaded');
-    } catch (error) {
+      if (statsRes.ok) {
+        const { data } = await statsRes.json();
+        setStats(data);
+      }
+      if (callsRes.ok) {
+        const { data } = await callsRes.json();
+        setCalls(data.calls ?? []);
+      }
+      if (keysRes.ok) {
+        const { data } = await keysRes.json();
+        setApiKeys(Array.isArray(data) ? data : data.keys ?? []);
+      }
+      if (paymentsRes.ok) {
+        const { data } = await paymentsRes.json();
+        setPayments(Array.isArray(data) ? data : data.transactions ?? []);
+      }
+    } catch {
       toast.error('Failed to load dashboard data');
     } finally {
       setLoading(false);
     }
-  };
+  }, [userId]);
 
-  const deleteSheet = (id: string) => {
-    setSheets(sheets.filter(s => s.id !== id));
-    toast.success('Sheet removed');
-  };
+  useEffect(() => {
+    if (isLoaded && userId) fetchAll();
+  }, [isLoaded, userId, fetchAll]);
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return date.toLocaleDateString();
-  };
-
-  const truncateAddress = (address: string) => {
-    return `${address.slice(0, 10)}...${address.slice(-8)}`;
+  const revokeKey = async (apiKey: string) => {
+    const res = await fetch(`/api/keys?apiKey=${apiKey}`, { method: 'DELETE' });
+    if (res.ok) {
+      setApiKeys(k => k.filter(a => a.apiKey !== apiKey));
+      toast.success('API key revoked');
+    } else {
+      toast.error('Failed to revoke key');
+    }
   };
 
   if (!isLoaded || loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-        >
+        <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
           <RefreshCw className="h-12 w-12 text-blue-400" />
         </motion.div>
       </div>
     );
   }
 
+  const quotaPct = stats
+    ? stats.callsLimit === 999_999_999
+      ? 0
+      : Math.round((stats.callsThisMonth / stats.callsLimit) * 100)
+    : 0;
+
   return (
     <>
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          style: {
-            background: '#1e293b',
-            color: '#f1f5f9',
-            border: '1px solid #334155',
-          },
-        }}
-      />
+      <Toaster position="top-right" toastOptions={{ style: { background: '#1e293b', color: '#f1f5f9', border: '1px solid #334155' } }} />
 
       <div className="space-y-8">
-        {/* Header with User Greeting */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex items-center justify-between"
-        >
+        {/* Header */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+          className="flex items-center justify-between">
           <div>
             <h1 className="text-4xl font-bold text-slate-100">
               Welcome back{user?.firstName ? `, ${user.firstName}` : ''}!
             </h1>
-            <p className="text-slate-400 mt-2">Monitor your API usage and payments</p>
+            <p className="text-slate-400 mt-2">
+              {stats?.tier ? (
+                <span>Plan: <span className="capitalize font-semibold text-blue-400">{stats.tier}</span> · {stats.activeApis} active API{stats.activeApis !== 1 ? 's' : ''}</span>
+              ) : 'Monitor your API usage and payments'}
+            </p>
           </div>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={loadDashboardData}
-            className="flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-white hover:bg-blue-600 transition-colors"
-          >
-            <RefreshCw className="h-4 w-4" />
-            Refresh
+          <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+            onClick={fetchAll}
+            className="flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2 text-white hover:bg-blue-600 transition-colors">
+            <RefreshCw className="h-4 w-4" /> Refresh
           </motion.button>
         </motion.div>
 
         {/* Stats Grid */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"
-        >
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center justify-between mb-4">
               <Activity className="h-8 w-8 text-blue-400" />
-              <span className="text-2xl font-bold text-slate-100">{stats.totalCalls}</span>
+              <span className="text-2xl font-bold text-slate-100">{stats?.totalCalls ?? 0}</span>
             </div>
             <h3 className="text-sm text-slate-400">Total API Calls</h3>
-            <div className="mt-2 flex items-center gap-1 text-xs text-green-400">
-              <TrendingUp className="h-3 w-3" />
-              <span>+12% from last month</span>
-            </div>
+            <p className="mt-1 text-xs text-slate-500">{stats?.callsThisMonth ?? 0} this month</p>
           </div>
 
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center justify-between mb-4">
               <Zap className="h-8 w-8 text-cyan-400" />
-              <span className="text-2xl font-bold text-slate-100">{stats.cachedCalls}</span>
+              <span className="text-2xl font-bold text-slate-100">{stats?.cacheHitRate ?? 0}%</span>
             </div>
-            <h3 className="text-sm text-slate-400">Cached Responses</h3>
-            <div className="mt-2 flex items-center gap-1 text-xs text-slate-400">
-              <Database className="h-3 w-3" />
-              <span>{Math.round((stats.cachedCalls / stats.totalCalls) * 100)}% cache hit rate</span>
-            </div>
+            <h3 className="text-sm text-slate-400">Cache Hit Rate</h3>
+            <p className="mt-1 text-xs text-slate-500">{stats?.cacheHits ?? 0} cached responses</p>
           </div>
 
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center justify-between mb-4">
               <Clock className="h-8 w-8 text-purple-400" />
-              <span className="text-2xl font-bold text-slate-100">{stats.avgResponseTime}ms</span>
+              <span className="text-2xl font-bold text-slate-100">{stats?.avgResponseTime ?? 0}ms</span>
             </div>
             <h3 className="text-sm text-slate-400">Avg Response Time</h3>
-            <div className="mt-2 flex items-center gap-1 text-xs text-green-400">
+            <div className="mt-1 flex items-center gap-1 text-xs text-green-400">
               <CheckCircle2 className="h-3 w-3" />
-              <span>{stats.successRate}% success rate</span>
+              <span>{stats?.successRate ?? 100}% success rate</span>
             </div>
           </div>
 
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center justify-between mb-4">
               <BarChart3 className="h-8 w-8 text-pink-400" />
-              <span className="text-2xl font-bold text-slate-100">{stats.remainingCalls}</span>
+              <span className="text-2xl font-bold text-slate-100">
+                {stats?.remainingCalls === 999_999_999 ? '∞' : (stats?.remainingCalls ?? 0)}
+              </span>
             </div>
             <h3 className="text-sm text-slate-400">Calls Remaining</h3>
             <div className="mt-2">
               <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
                 <motion.div
                   initial={{ width: 0 }}
-                  animate={{ width: `${(stats.callsThisMonth / 1000) * 100}%` }}
+                  animate={{ width: `${Math.min(quotaPct, 100)}%` }}
                   transition={{ duration: 1, delay: 0.5 }}
-                  className="h-full bg-gradient-to-r from-blue-400 to-cyan-400"
+                  className={`h-full rounded-full ${
+                    quotaPct > 80 ? 'bg-red-400' : quotaPct > 60 ? 'bg-yellow-400' : 'bg-gradient-to-r from-blue-400 to-cyan-400'
+                  }`}
                 />
               </div>
+              <p className="mt-1 text-xs text-slate-500">{quotaPct}% of {stats?.callsLimit === 999_999_999 ? '∞' : stats?.callsLimit} used</p>
             </div>
           </div>
         </motion.div>
 
-        {/* Charts Section */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="grid lg:grid-cols-2 gap-6"
-        >
-          {/* Weekly Usage Trend */}
+        {/* Charts */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
+          className="grid lg:grid-cols-2 gap-6">
+
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center gap-3 mb-6">
               <TrendingUp className="h-6 w-6 text-blue-400" />
-              <h2 className="text-2xl font-bold text-slate-100">Weekly Usage</h2>
+              <h2 className="text-xl font-bold text-slate-100">Response Status Distribution</h2>
             </div>
-            <ResponsiveContainer width="100%" height={250}>
-              <AreaChart data={usageData}>
-                <defs>
-                  <linearGradient id="colorCalls" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.8}/>
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                  </linearGradient>
-                  <linearGradient id="colorCached" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.8}/>
-                    <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="date" stroke="#94a3b8" />
-                <YAxis stroke="#94a3b8" />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: '#1e293b', 
-                    border: '1px solid #334155',
-                    borderRadius: '8px'
-                  }} 
-                />
-                <Area type="monotone" dataKey="calls" stroke="#3b82f6" fillOpacity={1} fill="url(#colorCalls)" />
-                <Area type="monotone" dataKey="cached" stroke="#06b6d4" fillOpacity={1} fill="url(#colorCached)" />
-              </AreaChart>
-            </ResponsiveContainer>
+            {statusData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={statusData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="status" stroke="#94a3b8" />
+                  <YAxis stroke="#94a3b8" />
+                  <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }} />
+                  <Bar dataKey="count" fill="#8b5cf6" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[220px] text-slate-500 text-sm">No call data yet</div>
+            )}
           </div>
 
-          {/* Method Distribution */}
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center gap-3 mb-6">
               <PieChart className="h-6 w-6 text-green-400" />
-              <h2 className="text-2xl font-bold text-slate-100">Method Distribution</h2>
+              <h2 className="text-xl font-bold text-slate-100">Status Breakdown</h2>
             </div>
-            <ResponsiveContainer width="100%" height={250}>
-              <RechartsPieChart>
-                <Pie
-                  data={methodData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={(entry) => `${entry.name}: ${entry.value}`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {methodData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: '#1e293b', 
-                    border: '1px solid #334155',
-                    borderRadius: '8px'
-                  }} 
-                />
-              </RechartsPieChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* Status Code Distribution */}
-          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6 lg:col-span-2">
-            <div className="flex items-center gap-3 mb-6">
-              <Activity className="h-6 w-6 text-purple-400" />
-              <h2 className="text-2xl font-bold text-slate-100">Response Status Codes</h2>
-            </div>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={statusData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="status" stroke="#94a3b8" />
-                <YAxis stroke="#94a3b8" />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: '#1e293b', 
-                    border: '1px solid #334155',
-                    borderRadius: '8px'
-                  }} 
-                />
-                <Bar dataKey="count" fill="#8b5cf6" radius={[8, 8, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {methodData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={220}>
+                <RechartsPieChart>
+                  <Pie data={methodData} cx="50%" cy="50%" outerRadius={80}
+                    label={(e) => `${e.name}: ${e.value}`} dataKey="value" labelLine={false}>
+                    {methodData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                  </Pie>
+                  <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }} />
+                </RechartsPieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[220px] text-slate-500 text-sm">No call data yet</div>
+            )}
           </div>
         </motion.div>
 
-        {/* Sheet Mappings */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
+        {/* API Keys */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}
           className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-3">
               <Link2 className="h-6 w-6 text-blue-400" />
-              <h2 className="text-2xl font-bold text-slate-100">Active Sheet Mappings</h2>
+              <h2 className="text-xl font-bold text-slate-100">Active API Keys</h2>
             </div>
-            <span className="text-sm text-slate-400">{sheets.length} active</span>
+            <span className="text-sm text-slate-400">{apiKeys.length} active</span>
           </div>
 
-          <div className="space-y-4">
-            {sheets.map((sheet, index) => (
-              <motion.div
-                key={sheet.id}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.4 + index * 0.1 }}
-                className="rounded-lg border border-slate-700 bg-slate-900/50 p-4 hover:border-slate-600 transition-colors"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Database className="h-4 w-4 text-blue-400" />
-                      <span className="text-sm font-mono text-slate-300">Sheet ID: {sheet.id}</span>
+          {apiKeys.length === 0 ? (
+            <p className="text-slate-500 text-sm text-center py-8">No API keys yet. Create one to get started.</p>
+          ) : (
+            <div className="space-y-4">
+              {apiKeys.map((api, i) => (
+                <motion.div key={api.id}
+                  initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.4 + i * 0.05 }}
+                  className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-slate-200 mb-1">{api.apiName}</p>
+                      <p className="text-xs font-mono text-slate-500 mb-2 truncate">{api.apiKey}</p>
+                      <div className="flex items-center gap-4 text-xs text-slate-500">
+                        <span className="flex items-center gap-1"><Activity className="h-3 w-3" />{api.callCountTotal} calls</span>
+                        {api.lastAccessed && (
+                          <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{timeAgo(api.lastAccessed)}</span>
+                        )}
+                        <span className="flex items-center gap-1"><Database className="h-3 w-3" />Sheet: {api.sheetId.slice(0, 12)}...</span>
+                      </div>
                     </div>
-                    <p className="text-xs text-slate-400 mb-3 break-all">{sheet.sheetUrl}</p>
-                    <div className="flex items-center gap-4 text-xs text-slate-500">
-                      <span className="flex items-center gap-1">
-                        <Activity className="h-3 w-3" />
-                        {sheet.totalCalls} calls
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Clock className="h-3 w-3" />
-                        {formatDate(sheet.lastAccessed)}
-                      </span>
+                    <div className="flex items-center gap-2 ml-4">
+                      <a href={api.sheetUrl} target="_blank" rel="noopener noreferrer"
+                        className="p-2 rounded-lg hover:bg-slate-700 transition-colors">
+                        <ExternalLink className="h-4 w-4 text-slate-400" />
+                      </a>
+                      <button onClick={() => revokeKey(api.apiKey)}
+                        className="p-2 rounded-lg hover:bg-red-500/10 transition-colors group">
+                        <Trash2 className="h-4 w-4 text-slate-400 group-hover:text-red-400" />
+                      </button>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <a
-                      href={sheet.sheetUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-2 rounded-lg hover:bg-slate-700 transition-colors"
-                    >
-                      <ExternalLink className="h-4 w-4 text-slate-400" />
-                    </a>
-                    <button
-                      onClick={() => deleteSheet(sheet.id)}
-                      className="p-2 rounded-lg hover:bg-red-500/10 transition-colors group"
-                    >
-                      <Trash2 className="h-4 w-4 text-slate-400 group-hover:text-red-400" />
-                    </button>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-          </div>
+                </motion.div>
+              ))}
+            </div>
+          )}
         </motion.div>
 
-        {/* Two Column Layout: Recent Activity */}
+        {/* Recent Calls + Payments */}
         <div className="grid lg:grid-cols-2 gap-8">
-          {/* Recent API Calls */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 }}
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
             className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center gap-3 mb-6">
               <Activity className="h-6 w-6 text-cyan-400" />
-              <h2 className="text-2xl font-bold text-slate-100">Recent API Calls</h2>
+              <h2 className="text-xl font-bold text-slate-100">Recent API Calls</h2>
             </div>
 
-            <div className="space-y-3">
-              {apiCalls.map((call, index) => (
-                <motion.div
-                  key={call.id}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.5 + index * 0.1 }}
-                  className="rounded-lg border border-slate-700 bg-slate-900/50 p-4"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${
-                        call.method === 'GET' ? 'bg-green-500/10 text-green-400' : 'bg-blue-500/10 text-blue-400'
-                      }`}>
-                        {call.method}
-                      </span>
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${
-                        call.status === 200 || call.status === 201 
-                          ? 'bg-green-500/10 text-green-400' 
-                          : 'bg-red-500/10 text-red-400'
-                      }`}>
-                        {call.status}
-                      </span>
-                      {call.cachedFromRedis && (
-                        <span className="px-2 py-1 rounded text-xs font-medium bg-purple-500/10 text-purple-400">
-                          ⚡ Cached
-                        </span>
-                      )}
+            {calls.length === 0 ? (
+              <p className="text-slate-500 text-sm text-center py-8">No calls yet — start hitting your endpoints!</p>
+            ) : (
+              <div className="space-y-3">
+                {calls.slice(0, 8).map((call, i) => (
+                  <motion.div key={call.id}
+                    initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.5 + i * 0.04 }}
+                    className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 rounded text-xs font-mono font-medium ${
+                          call.statusCode < 300 ? 'bg-green-500/10 text-green-400' :
+                          call.statusCode < 500 ? 'bg-yellow-500/10 text-yellow-400' :
+                          'bg-red-500/10 text-red-400'
+                        }`}>{call.statusCode}</span>
+                        {call.cacheHit && (
+                          <span className="px-2 py-0.5 rounded text-xs bg-purple-500/10 text-purple-400">⚡ cached</span>
+                        )}
+                        {call.responseTimeMs && (
+                          <span className="text-xs text-slate-500">{call.responseTimeMs}ms</span>
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-500">{timeAgo(call.timestamp)}</span>
                     </div>
-                    <span className="text-xs text-slate-500">{formatDate(call.createdAt)}</span>
-                  </div>
-                  <p className="text-sm font-mono text-slate-400">{call.endpoint}</p>
-                  {call.egldAddress && (
-                    <p className="text-xs text-slate-500 mt-2">EGLD: {truncateAddress(call.egldAddress)}</p>
-                  )}
-                </motion.div>
-              ))}
-            </div>
+                    <p className="text-xs font-mono text-slate-400 truncate">{call.api.apiName} — {call.endpoint}</p>
+                  </motion.div>
+                ))}
+              </div>
+            )}
           </motion.div>
 
-          {/* Payment History */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.5 }}
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}
             className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="flex items-center gap-3 mb-6">
               <Wallet className="h-6 w-6 text-green-400" />
-              <h2 className="text-2xl font-bold text-slate-100">Payment History</h2>
+              <h2 className="text-xl font-bold text-slate-100">EGLD Transactions</h2>
             </div>
 
-            <div className="space-y-3">
-              {payments.map((payment, index) => (
-                <motion.div
-                  key={payment.id}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.6 + index * 0.1 }}
-                  className="rounded-lg border border-slate-700 bg-slate-900/50 p-4"
-                >
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="h-4 w-4 text-green-400" />
-                      <span className="text-lg font-bold text-slate-100">{payment.amount} EGLD</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      {payment.status === 'confirmed' && <CheckCircle2 className="h-4 w-4 text-green-400" />}
-                      {payment.status === 'pending' && <AlertCircle className="h-4 w-4 text-yellow-400" />}
-                      {payment.status === 'failed' && <XCircle className="h-4 w-4 text-red-400" />}
-                      <span className={`text-xs font-medium ${
-                        payment.status === 'confirmed' ? 'text-green-400' :
-                        payment.status === 'pending' ? 'text-yellow-400' :
-                        'text-red-400'
-                      }`}>
-                        {payment.status}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="space-y-2 text-xs text-slate-400">
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-500">From:</span>
-                      <span className="font-mono">{truncateAddress(payment.senderAddress)}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-500">To:</span>
-                      <span className="font-mono">{truncateAddress(payment.receiverAddress)}</span>
-                    </div>
-                    {payment.description && (
+            {payments.length === 0 ? (
+              <p className="text-slate-500 text-sm text-center py-8">No payments yet. Upgrade to Pro to unlock more quota.</p>
+            ) : (
+              <div className="space-y-3">
+                {payments.map((p, i) => (
+                  <motion.div key={p.id}
+                    initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.6 + i * 0.05 }}
+                    className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+                    <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-slate-500">Note:</span>
-                        <span>{payment.description}</span>
+                        <DollarSign className="h-4 w-4 text-green-400" />
+                        <span className="font-bold text-slate-100">{p.amountEgld} EGLD</span>
                       </div>
-                    )}
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-700">
-                      <span className="flex items-center gap-1 text-slate-500">
-                        <Calendar className="h-3 w-3" />
-                        {formatDate(payment.createdAt)}
+                      <div className="flex items-center gap-1">
+                        {p.status === 'confirmed' && <CheckCircle2 className="h-4 w-4 text-green-400" />}
+                        {p.status === 'pending'   && <AlertCircle  className="h-4 w-4 text-yellow-400" />}
+                        {p.status === 'failed'    && <XCircle      className="h-4 w-4 text-red-400" />}
+                        <span className={`text-xs font-medium capitalize ${
+                          p.status === 'confirmed' ? 'text-green-400' :
+                          p.status === 'pending'   ? 'text-yellow-400' : 'text-red-400'
+                        }`}>{p.status}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span className="flex items-center gap-1">
+                        <Calendar className="h-3 w-3" />{timeAgo(p.createdAt)}
                       </span>
-                      <a
-                        href={`https://explorer.multiversx.com/transactions/${payment.transactionHash}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-blue-400 hover:text-blue-300"
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                        View on Explorer
+                      <a href={`https://explorer.multiversx.com/transactions/${p.txHash}`}
+                        target="_blank" rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-blue-400 hover:text-blue-300">
+                        <ExternalLink className="h-3 w-3" />Explorer
                       </a>
                     </div>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
           </motion.div>
         </div>
       </div>
