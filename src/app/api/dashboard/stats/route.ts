@@ -1,64 +1,77 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/db';
+import { NextRequest } from 'next/server';
+import { ok, err } from '@/lib/response';
+import prisma from '@/lib/db';
 
+export const runtime = 'nodejs';
+
+/**
+ * GET /api/dashboard/stats?userId=123
+ *
+ * Returns API usage stats for a specific user.
+ * Falls back to global stats when userId is omitted (admin use).
+ */
 export async function GET(request: NextRequest) {
   try {
-    // Get date range for current month
-    const now = new Date();
+    const rawUserId = request.nextUrl.searchParams.get('userId');
+    const userId    = rawUserId ? parseInt(rawUserId, 10) : null;
+
+    if (rawUserId && isNaN(userId!)) return err('Invalid userId');
+
+    const now          = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    
-    // Get total API calls
-    const totalCalls = await prisma.apiCall.count();
-    
-    // Get cached calls count
-    const cachedCalls = await prisma.apiCall.count({
-      where: { cachedFromRedis: true },
-    });
-    
-    // Get calls this month
-    const callsThisMonth = await prisma.apiCall.count({
-      where: {
-        createdAt: {
-          gte: startOfMonth,
-        },
-      },
-    });
-    
-    // Get successful calls (status 200-299)
-    const successfulCalls = await prisma.apiCall.count({
-      where: {
-        status: {
-          gte: 200,
-          lt: 300,
-        },
-      },
-    });
-    
-    // Calculate success rate
-    const successRate = totalCalls > 0 
-      ? Math.round((successfulCalls / totalCalls) * 100) 
-      : 100;
-    
-    // Get recent calls for average response time calculation
-    // Note: You'll need to add a responseTime field to your schema
-    const avgResponseTime = 89; // Placeholder - implement actual calculation
-    
-    const remainingCalls = Math.max(0, 1000 - callsThisMonth);
-    
-    return NextResponse.json({
+
+    // Build where clause scoped to user's API keys when userId is provided
+    const userApiKeys = userId
+      ? (await prisma.api.findMany({
+          where:  { userId, isActive: true },
+          select: { apiKey: true },
+        })).map(a => a.apiKey)
+      : null;
+
+    const callWhere = userApiKeys
+      ? { apiKey: { in: userApiKeys } }
+      : {};
+
+    const [totalCalls, callsThisMonth, successfulCalls, avgAgg] =
+      await prisma.$transaction([
+        prisma.apiCall.count({ where: callWhere }),
+        prisma.apiCall.count({
+          where: { ...callWhere, timestamp: { gte: startOfMonth } },
+        }),
+        prisma.apiCall.count({
+          where: { ...callWhere, statusCode: { gte: 200, lt: 300 } },
+        }),
+        prisma.apiCall.aggregate({
+          where:   callWhere,
+          _avg:    { responseTimeMs: true },
+        }),
+      ]);
+
+    // Quota info for the user
+    let quota: { callsUsed: number; callsLimit: number } | null = null;
+    if (userId) {
+      quota = await prisma.monthlyUsage.findUnique({
+        where:  { userId_month: { userId, month: startOfMonth } },
+        select: { callsUsed: true, callsLimit: true },
+      });
+    }
+
+    const successRate    = totalCalls > 0 ? Math.round((successfulCalls / totalCalls) * 100) : 100;
+    const avgResponseMs  = Math.round(avgAgg._avg.responseTimeMs ?? 0);
+    const callsLimit     = quota?.callsLimit ?? 1_000;
+    const callsUsed      = quota?.callsUsed  ?? callsThisMonth;
+    const remainingCalls = Math.max(0, callsLimit - callsUsed);
+
+    return ok({
       totalCalls,
-      cachedCalls,
-      callsThisMonth,
+      callsThisMonth: callsUsed,
       remainingCalls,
+      callsLimit,
       successRate,
-      avgResponseTime,
-      cacheHitRate: totalCalls > 0 ? Math.round((cachedCalls / totalCalls) * 100) : 0,
+      avgResponseTimeMs: avgResponseMs,
     });
   } catch (error) {
     console.error('Dashboard stats error:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch dashboard stats' },
-      { status: 500 }
-    );
+    return err('Failed to fetch dashboard stats', 500);
   }
 }
