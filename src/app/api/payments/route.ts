@@ -1,103 +1,75 @@
-import { NextRequest, NextResponse } from 'next/server';
-import {
-  isValidEGLDAddress,
-  getAccountInfo,
-  getTransactionStatus,
-} from '@/lib/multiversx';
+import { NextRequest } from 'next/server';
+import { ok, err } from '@/lib/response';
 import prisma from '@/lib/db';
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { amount, recipientAddress, egldAddress } = body;
-
-    if (!amount || typeof amount !== 'string') {
-      return NextResponse.json(
-        { error: 'Invalid amount' },
-        { status: 400 },
-      );
-    }
-
-    if (!isValidEGLDAddress(recipientAddress)) {
-      return NextResponse.json(
-        { error: 'Invalid recipient address' },
-        { status: 400 },
-      );
-    }
-
-    if (!isValidEGLDAddress(egldAddress)) {
-      return NextResponse.json(
-        { error: 'Invalid user EGLD address' },
-        { status: 400 },
-      );
-    }
-
-    const account = await getAccountInfo(egldAddress);
-    if (!account) {
-      return NextResponse.json(
-        { error: 'Could not fetch account info' },
-        { status: 400 },
-      );
-    }
-
-    const payment = await prisma.payment.create({
-      data: {
-        amount,
-        recipientAddress,
-        userAddress: egldAddress,
-        status: 'pending',
-      },
-    });
-
-    return NextResponse.json(
-      {
-        paymentId: payment.id,
-        amount,
-        recipientAddress,
-        txFeePercentage: 0.001,
-        totalAmount: (parseFloat(amount) * 1.001).toString(),
-      },
-      { status: 201 },
-    );
-  } catch (error) {
-    console.error('POST /api/payments error:', error);
-    return NextResponse.json(
-      { error: 'Payment processing failed' },
-      { status: 500 },
-    );
-  }
-}
+export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
-  try {
-    const paymentId = request.nextUrl.searchParams.get('paymentId');
-    const txHash = request.nextUrl.searchParams.get('txHash');
+  const { searchParams } = request.nextUrl;
+  const clerkId = searchParams.get('clerkId');
+  const page    = Math.max(1, parseInt(searchParams.get('page')  ?? '1',  10));
+  const limit   = Math.min(50, parseInt(searchParams.get('limit') ?? '20', 10));
 
-    if (!paymentId || !txHash) {
-      return NextResponse.json(
-        { error: 'Missing paymentId or txHash' },
-        { status: 400 },
-      );
-    }
+  if (!clerkId) return err('Missing clerkId', 400);
 
-    const txStatus = await getTransactionStatus(txHash);
+  const user = await prisma.user.findUnique({ where: { clerkId } });
+  if (!user) return err('User not found', 404);
 
-    const payment = await prisma.payment.update({
-      where: { id: paymentId },
-      data: { status: txStatus === 'success' ? 'completed' : 'failed' },
-    });
+  const skip  = (page - 1) * limit;
+  const where = { userId: user.id };
 
-    return NextResponse.json({
-      paymentId,
-      txHash,
-      status: payment.status,
-      amount: payment.amount,
-    });
-  } catch (error) {
-    console.error('GET /api/payments error:', error);
-    return NextResponse.json(
-      { error: 'Payment lookup failed' },
-      { status: 500 },
-    );
-  }
+  const [transactions, total] = await prisma.$transaction([
+    prisma.egldTransaction.findMany({
+      where,
+      skip,
+      take:    limit,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id:           true,
+        txHash:       true,
+        amountEgld:   true,
+        creditsAdded: true,
+        status:       true,
+        confirmedAt:  true,
+        createdAt:    true,
+      },
+    }),
+    prisma.egldTransaction.count({ where }),
+  ]);
+
+  return ok({
+    transactions,
+    pagination: {
+      page, limit, total,
+      pages:   Math.ceil(total / limit),
+      hasNext: skip + limit < total,
+    },
+  });
+}
+
+export async function POST(request: NextRequest) {
+  // Initiate a payment intent — returns the receiver address and expected amounts
+  const body = await request.json().catch(() => null);
+  if (!body?.tier) return err('Missing tier');
+
+  const TIER_PRICING: Record<string, { egld: number; description: string }> = {
+    pro:        { egld: 0.5,  description: 'Pro — 10,000 calls/month' },
+    enterprise: { egld: 2.0,  description: 'Enterprise — Unlimited calls/month' },
+  };
+
+  const pricing = TIER_PRICING[body.tier];
+  if (!pricing) return err(`Invalid tier. Valid: ${Object.keys(TIER_PRICING).join(', ')}`);
+
+  return ok({
+    receiver:    process.env.EGLD_RECEIVER_ADDRESS,
+    amountEgld:  pricing.egld,
+    description: pricing.description,
+    memo:        `gridlink-${body.tier}-upgrade`,
+    instructions: [
+      `Send exactly ${pricing.egld} EGLD to the receiver address`,
+      'Use xPortal or MultiversX Web Wallet',
+      'Copy the transaction hash after sending',
+      'Call POST /api/payments/verify with { txHash, userId, expectedTier }',
+    ],
+  });
 }

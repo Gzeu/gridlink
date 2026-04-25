@@ -1,48 +1,40 @@
-import { authMiddleware } from '@clerk/nextjs';
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-// Rate limiting map (in production use Redis)
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+// Routes that never require authentication
+const isPublic = createRouteMatcher([
+  '/',
+  '/sign-in(.*)',
+  '/sign-up(.*)',
+  '/api/sheets',         // public read endpoint (API-key gated, not session-gated)
+  '/api/sheets/write',   // API-key gated
+  '/api/payments/verify',
+  '/api/users/sync',
+  '/api/cron(.*)',
+]);
 
-const RATE_LIMIT = 100; // requests per window
-const RATE_WINDOW = 15 * 60 * 1000; // 15 minutes
+export default clerkMiddleware((auth, req: NextRequest) => {
+  // Block obviously invalid API key formats early (before hitting DB)
+  const apiKey = req.headers.get('x-api-key');
+  const isApiRoute = req.nextUrl.pathname.startsWith('/api/sheets');
 
-function rateLimit(request: NextRequest): NextResponse | null {
-  const ip = request.ip || request.headers.get('x-forwarded-for') || 'unknown';
-  const now = Date.now();
-  
-  const rateLimitData = rateLimitMap.get(ip);
-  
-  if (!rateLimitData || now > rateLimitData.resetTime) {
-    rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_WINDOW });
-    return null;
-  }
-  
-  if (rateLimitData.count >= RATE_LIMIT) {
+  if (isApiRoute && apiKey && !apiKey.startsWith('gl_')) {
     return NextResponse.json(
-      { error: 'Rate limit exceeded. Try again later.' },
-      { status: 429 }
+      { success: false, data: null, error: 'Invalid API key format. Keys must start with gl_' },
+      { status: 401 },
     );
   }
-  
-  rateLimitData.count++;
-  return null;
-}
 
-export default authMiddleware({
-  publicRoutes: ['/'],
-  ignoredRoutes: ['/api/health'],
-  beforeAuth: (request) => {
-    // Apply rate limiting to API routes
-    if (request.nextUrl.pathname.startsWith('/api/')) {
-      const rateLimitResponse = rateLimit(request);
-      if (rateLimitResponse) return rateLimitResponse;
-    }
-    return NextResponse.next();
-  },
+  if (!isPublic(req)) {
+    auth().protect();
+  }
+
+  return NextResponse.next();
 });
 
 export const config = {
-  matcher: ['/((?!.+\\.[\\w]+$|_next).*)', '/', '/(api|trpc)(.*)'],
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|.*\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+  ],
 };
