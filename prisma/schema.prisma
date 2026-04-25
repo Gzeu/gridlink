@@ -16,10 +16,11 @@ model User {
   subscriptionStatus String    @default("active") @map("subscription_status")
   egldCredits        Decimal   @default(0) @map("egld_credits") @db.Decimal(10, 4)
   createdAt          DateTime  @default(now()) @map("created_at")
-  
+
   apis               Api[]
   egldTransactions   EgldTransaction[]
   monthlyUsage       MonthlyUsage[]
+  payments           Payment[]
 
   @@map("users")
 }
@@ -38,7 +39,7 @@ model Api {
   callCountMonth   Int       @default(0) @map("call_count_month")
   isActive         Boolean   @default(true) @map("is_active")
   webhookUrl       String?   @map("webhook_url")
-  
+
   user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   apiCalls         ApiCall[]
 
@@ -55,7 +56,7 @@ model ApiCall {
   statusCode      Int      @map("status_code")
   ipAddress       String?  @map("ip_address")
   userAgent       String?  @map("user_agent")
-  
+
   api             Api      @relation(fields: [apiKey], references: [apiKey])
 
   @@index([apiKey])
@@ -72,7 +73,7 @@ model EgldTransaction {
   status        String    @default("pending")
   createdAt     DateTime  @default(now()) @map("created_at")
   confirmedAt   DateTime? @map("confirmed_at")
-  
+
   user          User      @relation(fields: [userId], references: [id])
 
   @@index([userId])
@@ -85,9 +86,28 @@ model MonthlyUsage {
   month       DateTime
   callsUsed   Int      @default(0) @map("calls_used")
   callsLimit  Int      @map("calls_limit")
-  
+
   user        User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, month])
   @@map("monthly_usage")
+}
+
+// Payment model — tracks EGLD payments for tier upgrades
+model Payment {
+  id               String    @id @default(cuid())
+  userId           Int?      @map("user_id")
+  amount           String
+  recipientAddress String    @map("recipient_address")
+  userAddress      String    @map("user_address")
+  txHash           String?   @unique @map("tx_hash")
+  status           String    @default("pending") // pending | completed | failed
+  tier             String?   // free | pro | enterprise
+  createdAt        DateTime  @default(now()) @map("created_at")
+  confirmedAt      DateTime? @map("confirmed_at")
+
+  user             User?     @relation(fields: [userId], references: [id])
+
+  @@index([userAddress])
+  @@map("payments")
 }
